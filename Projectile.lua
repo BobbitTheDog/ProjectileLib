@@ -2,9 +2,8 @@
 	Projectile library for creating moving projectiles instead of instant hitscans.
 	Projectiles created as GMObjects, with managed physics and logic for what collisions to pay attention to
 	Provides ability to set amount of enemies and/or walls to pierce through, and what to do to actors when you do pierce them
-	Three preset methods, Grenade, Bullet, and Rocket, can be used for quickly creating common types of projectile.
+	Three preset methods, Grenade, Bullet, and Rocket, can be used for quickly creating common types of projectile. (ROCKET NOT YET IMPLEMENTED)
 	Alternatively, you can use Projectile.Custom(args) (more complex, but greater control) to make your own type of projectile. If you do this, I would recommend creating a wrapper method similar to the three preset methods seen below.
-	Upcoming features: Bouncing projectiles, callbacks to execute custom code on hit, ability to "register" existing instances to treat them as pseudo-projectiles
 ]]
 
 
@@ -102,8 +101,8 @@ local projectileParameters = {
 	pierceCount = {type = "number", optional = true},			--how many enemies to pierce, -1 for infinite
 	continuousHitDelay = {type = "number", optional = true, default = -1},
 	phaseCount = {type = "number", optional = true},			--how many walls to pierce, -1 for infinite
-	bounceType = {type = "number", optional = true, sanitise = function(arg) return math.floor(arg) end, validate = function(arg) return (arg > 0 and arg < 4), "bounceType argument must be a Projectile.BounceType: MAP (1), ENEMY (2), or BOTH (3). Received: "..arg end},			--TODO:whether to bounce off of enemies, walls, or both (when it is not due to pierce/phase them)
-	bounceCount = {type = "number", optional = true},			--TODO:how many times to bounce off things it does not pierce, -1 for infinite
+	bounceType = {type = "number", optional = true, sanitise = function(arg) return math.floor(arg) end, validate = function(arg) return (arg > 0 and arg < 4), "bounceType argument must be a Projectile.BounceType: MAP (1), ENEMY (2), or BOTH (3). Received: "..arg end},			--whether to bounce off of enemies, walls, or both (when it is not due to pierce/phase them)
+	bounceCount = {type = "number", optional = true},			--how many times to bounce off things it does not pierce, -1 for infinite
 	timer = {type = "number", optional = function(args) return args.pierce > -1 end},		--how many frames before destroying, if not already collided
 	pierceDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters},		--damager to be generated when piercing an enemy
 	bounceDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters},		--TODO:damager to be generated when bouncing off an enemy or wall
@@ -363,4 +362,64 @@ function Projectile.fire(projectileObject, x, y, parent, direction, velocity, ph
 	end
 end
 
-export("Projectile")
+-- treat existing instances as projectiles!
+Projectile.pseudoProjectiles = {}
+-- current thoughts: bind to the entire game's step callback, iterate over a list of registered pseudoProjectiles, and do the thing
+local pseudoProjectileParameters = {
+	instance = {type = "Instance", optional = false},
+	duration = {type = "number", optional = true},
+	pierceDamagerProperties = {type = "table", optional = false, fields = pierceDamagerParameters},
+	continuousHitDelay = {type = "number", optional = true, default = -1},
+	destroyInstanceOnHit = {type = boolean, optional = true, default = false}
+}
+
+-- use an existing instance for collision checking, applying the provided damagers when the instance collides
+-- does not affect the instance's movement, is intended simply to apply collision checking and damager spawning for things like existing actors
+-- instance: the instance to treat as a projectile
+-- duration: how long to treat the instance as a projectile - leave nil to keep treating it as a projectile until removed with "deregisterPseudoProjectile"
+-- damagerProperties: the properties of the damager to produce when colliding with an actor
+-- continuousHitDelay: the frames to wait between successive hits if continually colliding with the same actor. Defaults to -1, which disables continuous hits entirely.
+-- returns: boolean representing successful registration or not (common cause could be instance is no longer valid)
+function Projectile.registerPseudoProjectile(instance, duration, pierceDamagerProperties, continuousHitDelay, destroyInstanceOnEnd)
+	assert(validateArguments({instance = instance, duration = duration, pierceDamagerProperties = damagerProperties, destroyInstanceOnEnd = destroyInstanceOnEnd}, pseudoProjectileParameters))
+	if not instance:isValid() then return false end
+	Projectile.pseudoProjectiles[instance] = {
+		duration = duration,
+		pierceDamagerProperties = pierceDamagerProperties,
+		continuousHitDelay = continuousHitDelay,
+		destroyInstanceOnEnd = destroyInstanceOnEnd,
+	}
+end
+
+function pseudoProjectileStep(instance, args) -- handle collisions and damage for a pseudoProjectile - hopefully can simply refactor out the main projectile collision code
+	
+end
+
+-- the method that will be called each step to handle the collisions for registered pseudoProjectiles
+function Projectile.handlePseudoProjectiles()
+	--for continuous hits, set a variable prefix..[instanceID].."collision" with the frameDelay, as a timer
+	for instance, args in pairs(Projectile.pseudoProjectiles) do
+		pseudoProjectileStep(instance, args)
+	end
+end
+
+-- instance: the instance to deregister. Alternately, an instanceID of the instance to deregister, in which case a namespace will also be needed
+-- returns a boolean for whether the instance was successfully found and deregistered
+function Projectile.deregisterPseudoProjectile(instance)
+	if isa(instance, "string") then -- passed an id instead of instance, find the instance
+		assert(namespace)
+		instance = Object.findInstance(instance, namespace)
+		if not instance then return false end
+	end
+	
+	if not Projectile.pseudoProjectiles[instance] then return false end
+	
+	Projectile.pseudoProjectiles[instance] = nil
+	return true
+end
+
+registercallback("onStep", function()
+	Projectile.handlePseudoProjectiles()
+end)
+
+return Projectile
