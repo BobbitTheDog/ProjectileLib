@@ -1,0 +1,7 @@
+{
+    "name": "ProjectileLib",
+    "description": "A highly customisable, beginner-friendly, projectile library for RoR ModLoader",
+	"internalname": "btd_projectile",
+    "version": "0.1",
+    "author": "BobbitTheDog"
+}
