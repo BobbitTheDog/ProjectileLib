@@ -102,8 +102,8 @@ local projectileParameters = {
 	pierceCount = {type = "number", optional = true},			--how many enemies to pierce, -1 for infinite
 	continuousHitDelay = {type = "number", optional = true, default = -1},
 	phaseCount = {type = "number", optional = true},			--how many walls to pierce, -1 for infinite
-	bounceType = {type = "number", optional = true, sanitise = function(arg) return math.floor(arg) end, validate = function(arg) return (arg > 0 and arg < 4), "bounceType argument must be a Projectile.BounceType: MAP (1), ENEMY (2), or BOTH (3). Received: "..arg end},			--whether to bounce off of enemies, walls, or both (when it is not due to pierce/phase them)
-	bounceCount = {type = "number", optional = true},			--how many times to bounce off things it does not pierce, -1 for infinite
+	bounceType = {type = "number", optional = true, sanitise = function(arg) return math.floor(arg) end, validate = function(arg) return (arg > 0 and arg < 4), "bounceType argument must be a Projectile.BounceType: MAP (1), ENEMY (2), or BOTH (3). Received: "..arg end},			--TODO:whether to bounce off of enemies, walls, or both (when it is not due to pierce/phase them)
+	bounceCount = {type = "number", optional = true},			--TODO:how many times to bounce off things it does not pierce, -1 for infinite
 	timer = {type = "number", optional = function(args) return args.pierce > -1 end},		--how many frames before destroying, if not already collided
 	pierceDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters},		--damager to be generated when piercing an enemy
 	bounceDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters},		--TODO:damager to be generated when bouncing off an enemy or wall
