@@ -11,7 +11,7 @@ local inspect = require("inspect")
 local json = require("json")
 
 local Projectile = {}
-local prefix = "projectile_"
+local prefix = "btd_projectile_"
 
 -- get the actor that fired the projectile
 function Projectile.getParent(projectileInstance)
