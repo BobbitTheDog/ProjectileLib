@@ -7,18 +7,33 @@
 ]]
 
 
-local inspect = require("inspect")
 local json = require("json")
+local inspect = require("inspect")
 
 local Projectile = {}
-local prefix = "btd_projectile_"
+local PROJECTILE_ARGS = {}
 
 -- get the actor that fired the projectile
 function Projectile.getParent(projectileInstance)
 	if projectileInstance:isValid() then
-		local parent = Object.findInstance(projectileInstance:get(prefix.."parent"))
+		local parent = Object.findInstance(projectileInstance:get("btd_projectile_parent"))
 		if parent and parent:isValid() then return parent end
 	end
+end
+
+-- collision checking, get list of actor IDs
+function getActorCollisions(instance)
+	local collisions = {}
+	local allActors = ObjectGroup.find("actors"):findAll()
+	for i=1,#allActors do
+		local actor = allActors[i]
+		if actor:isValid()
+		  and actor:get("team") ~= instance:get("btd_projectile_team")
+		  and instance:collidesWith(actor, instance.x, instance.y) then
+			collisions[""..actor.id] = true --coerce into string for json encoding
+		end
+	end
+	return collisions
 end
 
 --[[ internal func to validate the types and inputs of arguments, using a validation table
@@ -33,9 +48,9 @@ end
 function validateArguments(arguments, parameters)
 	local msg = "Validation errors:"
 	for param,validation in pairs(parameters) do
-		if (type(validation.optional) == function and validation.optional(arguments) or validation.optional == true) and arguments[param] == nil then -- optional and missing, set defaults and continue
+		if (type(validation.optional) == "function" and validation.optional(arguments) or validation.optional == true) and arguments[param] == nil then -- optional and missing, set defaults and continue
 			if validation.default ~= nil then 
-				arguments[param] = type(validation.default) == function and validation.default(arguments) or validation.default
+				arguments[param] = type(validation.default) == "function" and validation.default(arguments) or validation.default
 			end
 		elseif (arguments[param] == nil and not validation.optional) -- non-optional and missing, error
 		or not isa(arguments[param], validation.type) --wrong type, error
@@ -59,19 +74,6 @@ function validateArguments(arguments, parameters)
 	return (msg == "Validation errors:"), msg
 end
 
--- collision checking, get list of actor IDs
-function getActorCollisions(instance)
-	local collisions = {}
-	for i,actor in ipairs(ObjectGroup.find("actors"):findAll()) do
-		if actor:isValid()
-		  and actor:get("team") ~= instance:get(prefix.."team")
-		  and instance:collidesWith(actor, instance.x, instance.y) then
-			collisions[""..actor.id] = true --coerce into string for json encoding
-		end
-	end
-	return collisions
-end
-
 -- enums
 Projectile.DamagerType = {BULLET = 0, EXPLOSION = 1}
 Projectile.BounceType = {MAP = 1, ENEMIES = 2, BOTH = 3}
@@ -87,8 +89,8 @@ local damagerParameters = {
 	distance = {type = "number", optional = true, default = function(args) return args.damagerType == Projectile.DamagerType.BULLET and 1 or nil end}, --default to 1 for collision bullets
 	explosionSprite = {type = "Sprite", optional = true},
 	hitSprite = {type = "Sprite", optional = true},
-	explosionWidth = {type = "number", optional = function(args) return not args.damagerType == Projectile.DamagerType.EXPLOSION end},
-	explosionHeight = {type = "number", optional = function(args) return not not args.damagerType == Projectile.DamagerType.EXPLOSION end},
+	explosionWidth = {type = "number", optional = function(args) return args.damagerType ~= Projectile.DamagerType.EXPLOSION end},
+	explosionHeight = {type = "number", optional = function(args) return args.damagerType ~= Projectile.DamagerType.EXPLOSION end},
 	damage = {type = "number", optional = false},
 	mlDamagerProperties = {type = "number", optional = true} 
 }
@@ -98,181 +100,190 @@ local damagerParameters = {
 local projectileParameters = {
 	name = {type = "string", optional = false},
 	sprite = {type = "Sprite", optional = false},			--sprite for the projectile
-	pierceCount = {type = "number", optional = true},			--how many enemies to pierce, -1 for infinite
-	continuousHitDelay = {type = "number", optional = true, default = -1},
-	phaseCount = {type = "number", optional = true},			--how many walls to pierce, -1 for infinite
+	pierceCount = {type = "number", optional = true},	--how many enemies to pierce, -1 for infinite
+	phaseCount = {type = "number", optional = true},		--how many walls to pierce, -1 for infinite
+	bounceCount = {type = "number", optional = true},	--how many times to bounce off things it does not pierce, -1 for infinite
+	distance = {type = "number", optional = function(args) return args.timer and args.timer > 0 end},		--how far away from the player the projectile can go before being destroyed
+	timer = {type = "number", optional = function(args) return args.distance and args.distance > 0 end},			--how many frames before destroying, if not already collided
+	continuousHitDelay = {type = "number", optional = true, default = -1},			--how many frames between hits when continually colliding with an actor
 	bounceType = {type = "number", optional = true, sanitise = function(arg) return math.floor(arg) end, validate = function(arg) return (arg > 0 and arg < 4), "bounceType argument must be a Projectile.BounceType: MAP (1), ENEMY (2), or BOTH (3). Received: "..arg end},			--whether to bounce off of enemies, walls, or both (when it is not due to pierce/phase them)
-	bounceCount = {type = "number", optional = true},			--how many times to bounce off things it does not pierce, -1 for infinite
-	timer = {type = "number", optional = function(args) return args.pierce > -1 end},		--how many frames before destroying, if not already collided
-	pierceDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters},		--damager to be generated when piercing an enemy
-	bounceDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters},		--TODO:damager to be generated when bouncing off an enemy or wall
-	phaseStartDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters},		--TODO:damager to be generated when entering a wall
-	phaseEndDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters},		--TODO:damager to be generated when leaving a wall
-	endDamagerProperties = {type = "table", optional = true, default = nil, fields = damagerParameters}		--damager for the final hit / explosion
+	pierceDamagerProperties = {type = "table", optional = true, fields = damagerParameters},			--damager to be generated when piercing an enemy
+	bounceDamagerProperties = {type = "table", optional = true, fields = damagerParameters},			--TODO:damager to be generated when bouncing off an enemy or wall
+	phaseStartDamagerProperties = {type = "table", optional = true, fields = damagerParameters},		--TODO:damager to be generated when entering a wall
+	phaseEndDamagerProperties = {type = "table", optional = true, fields = damagerParameters},		--TODO:damager to be generated when leaving a wall
+	endDamagerProperties = {type = "table", optional = true, fields = damagerParameters}				--damager for the final hit / explosion fired when the projectile is destroyed
 }
+
+function projectileInit(projectileInstance)
+	local accessor = projectileInstance:getAccessor() -- TODO: test if can store table data here
+	-- set up variables that change on an instance-specific basis
+	local args = PROJECTILE_ARGS[projectileInstance:getObject():getName()]
+	if args.timer and args.timer > 0 then accessor["btd_projectile_timer"]= args.timer end
+	if args.pierceCount then accessor["btd_projectile_pierceCount"] = args.pierceCount end
+	if args.phaseCount then accessor["btd_projectile_phaseCount"] = args.phaseCount end
+	if args.distance then
+		accessor["btd_projectile_distance"] = args.distance
+		accessor["btd_projectile_travelled"] = 0
+		accessor["btd_projectile_lastX"] = projectileInstance.x
+		accessor["btd_projectile_lastY"] = projectileInstance.y
+	end
+end
+
+function projectileStep(projectileInstance)
+	local accessor = projectileInstance:getAccessor()
+	local args = PROJECTILE_ARGS[projectileInstance:getObject():getName()]
+	--print("step")
+	--calculate any horizontal acceleration, as not accounted for by GameMaker
+	local acceleration = accessor["btd_projectile_ax"]
+	if acceleration then
+		local speed = accessor["hspeed"]
+		accessor["hspeed"] = speed + acceleration
+	end
+	
+	-- check for actor collisions
+	local pierceCount = accessor["btd_projectile_pierceCount"]
+	if pierceCount == nil or pierceCount >= 0 then --need to watch for collisions
+		local currentCollisions = getActorCollisions(projectileInstance)
+		if next(currentCollisions) then
+			local processedCollisions = json.decode(accessor["btd_projectile_processedActorCollisions"] or "[]")
+			-- check for new collisions, subtract from count or explode
+			for actorId,exists in pairs(currentCollisions) do
+				local continuousHit = false	--tells us whether we need to hit because of the continuous hit settings
+				local newPierce = false		-- tells us whether to deduct from the pierceCount
+				local actor = nil			-- will only be set if we need to do continuous hits, to store a new hitDelay on the actor
+				
+				if processedCollisions[actorId] then -- existing collision, process "continuous hit" logic to see if needs another hit
+					newPierce = false
+					if args.continuousHitDelay >= 0 then
+						actor = ObjectGroup.find("actors"):findInstance(actorId)
+						local hitTimer = actor:get("btd_projectile_continuousHitDelay")
+						continuousHit = (hitTimer == nil or hitTimer <= 0)
+						
+						if not continuousHit then -- no hit yet, subtract from the hit delay timer
+							actor:set("btd_projectile_continuousHitDelay", hitTimer - 1)
+						end
+					end
+				else	-- new collision
+					newPierce = true
+				end
+				
+				if newPierce or continuousHit then
+					if args.pierceDamagerProperties then -- create pierce damager
+						local parent = Projectile.getParent(projectileInstance)
+						local damagerProperties = args.pierceDamagerProperties
+						if damagerProperties.damagerType == Projectile.DamagerType.EXPLOSION then
+							parent:fireExplosion(projectileInstance.x, projectileInstance.y,
+							damagerProperties.explosionWidth/19,
+							damagerProperties.explosionHeight/4,
+							damagerProperties.damage,
+							damagerProperties.explosionSprite,
+							damagerProperties.hitSprite,
+							damagerProperties.mlDamagerProperties)
+						else
+							local bullet = parent:fireBullet(projectileInstance.x, projectileInstance.y,
+							damagerProperties.direction,
+							damagerProperties.distance,
+							damagerProperties.damage,
+							damagerProperties.hitSprite,
+							damagerProperties.mlDamagerProperties
+							)
+							bullet:set("specific_target", actorId)
+						end
+					end
+					if pierceCount == nil or pierceCount == 0 then -- if that was the last pierce, destroy projectile
+						projectileInstance:destroy()
+						return
+					end
+					if newPierce then accessor["btd_projectile_pierceCount"] = pierceCount -1 end-- subtract from remaining pierces
+					if actor then actor:set("btd_projectile_continuousHitDelay", args.continuousHitDelay) end
+				end
+			end
+		end
+		--store current collisions for next check
+		accessor["btd_projectile_processedActorCollisions"] = json.encode(currentCollisions)
+	end
+	
+	-- check for map collisions
+	local phaseCount = accessor["btd_projectile_phaseCount"]
+	if phaseCount == nil or phaseCount >= 0 then --need to watch for collisions
+		local alreadyPhasing = accessor["btd_projectile_alreadyPhasing"]
+		if projectileInstance:collidesMap(projectileInstance.x, projectileInstance.y) then
+			--collision, check if currently mid-phase (not a new collision)
+			if not alreadyPhasing then -- new collision,  explode if nil or 0, otherwise subtract and set to ignore current collision
+				if (phaseCount == nil or phaseCount == 0) then
+					projectileInstance:destroy()
+					return
+				end
+				accessor["btd_projectile_phaseCount"] = phaseCount -1
+				accessor["btd_projectile_alreadyPhasing"] = 1
+			end
+		elseif alreadyPhasing then --just exited phase, reset ready for future checks
+			accessor["btd_projectile_alreadyPhasing"] = nil
+		end
+	end
+	
+	--check if timer expired
+	local timer = accessor["btd_projectile_timer"]
+	if timer then
+		if timer <= 0 then
+			projectileInstance:destroy()
+			return
+		end
+		accessor["btd_projectile_timer"] = timer - 1
+	end
+	
+	--check if distance travelled
+	local distance = accessor["btd_projectile_distance"]
+	if distance then
+		local currentDistance = accessor["btd_projectile_travelled"]
+		local lastX = accessor["btd_projectile_lastX"]
+		local lastY = accessor["btd_projectile_lastY"]
+		local deltaX = math.abs(projectileInstance.x - lastX)
+		local deltaY = math.abs(projectileInstance.y - lastY)
+		local travelled = math.sqrt(deltaX*deltaX + deltaY*deltaY)
+		if currentDistance + travelled >= distance then
+			projectileInstance:destroy()
+			return
+		end
+		accessor["btd_projectile_travelled"] = currentDistance + travelled
+		
+		accessor["btd_projectile_lastX"] = projectileInstance.x
+		accessor["btd_projectile_lastY"] = projectileInstance.y
+	end
+end
+
+function projectileDestroy(projectileInstance)
+	--print("destroy")
+	if not PROJECTILE_ARGS[projectileInstance:getObject():getName()].endDamagerProperties then return end
+	local parent = Projectile.getParent(projectileInstance)
+	local damagerProperties = PROJECTILE_ARGS[projectileInstance:getObject():getName()].endDamagerProperties
+	if damagerProperties.damagerType == Projectile.DamagerType.EXPLOSION then
+		parent:fireExplosion(projectileInstance.x, projectileInstance.y,
+		damagerProperties.explosionWidth/19,
+		damagerProperties.explosionHeight/4,
+		damagerProperties.damage,
+		damagerProperties.explosionSprite,
+		damagerProperties.hitSprite,
+		damagerProperties.mlDamagerProperties)
+	else
+		parent:fireBullet(projectileInstance.x, projectileInstance.y,
+		damagerProperties.direction,
+		damagerProperties.distance,
+		damagerProperties.damage,
+		damagerProperties.hitSprite,
+		damagerProperties.mlDamagerProperties)
+	end
+end
 
 function Projectile.Custom(args)
 	assert(validateArguments(args,
 	projectileParameters))
-	print(require("inspect")(args))
 	local projectileObject = Object.new(args.name)
 	projectileObject.sprite = args.sprite
-	projectileObject:addCallback("create", function(self)
-		local accessor = self:getAccessor() -- TODO: test if can store table data here
-		print("create")
-		if args.timer and args.timer > 0 then self:set(prefix.."timer", args.timer) end
-		if args.pierceCount then self:set(prefix.."pierceCount", args.pierceCount) end
-		if args.phaseCount then self:set(prefix.."phaseCount", args.phaseCount) end
-		if args.distance then
-			self:set(prefix.."distance", args.distance)
-			self:set(prefix.."travelled", 0)
-			self:set(prefix.."lastX", self.x)
-			self:set(prefix.."lastY", self.y)
-		end
-	end)
-	projectileObject:addCallback("step", function(self)
-		print("step")
-		--calculate any horizontal acceleration, as not accounted for by GameMaker
-		local acceleration = self:get(prefix.."ax")
-		if acceleration then
-			local speed = self:get("hspeed")
-			self:set("hspeed", speed + acceleration)
-		end
-		
-		-- check for actor collisions
-		local pierceCount = self:get(prefix.."pierceCount")
-		if pierceCount == nil or pierceCount >= 0 then --need to watch for collisions
-			local currentCollisions = getActorCollisions(self)
-			
-			if currentCollisions ~= {} then 
-				local processedCollisions = json.decode(self:get(prefix.."processedActorCollisions") or "[]")
-				-- check for new collisions, subtract from count or explode
-				for actorId,exists in pairs(currentCollisions) do
-					local shouldHit = false
-					local newPierce = true	-- tells us whether to deduct from the pierceCount
-					local actor = nil		-- will only be set if we need to do continuous hits, to store a new hitDelay on the actor
-					
-					if processedCollisions[actorId] then -- existing collision, process "continuous hit" logic to see if needs another hit
-						newPierce = false
-						if args.continuousHitDelay >= 0 then
-							actor = ObjectGroup.find("actors"):findInstance(actorId)
-							local hitTimer = actor:get(prefix.."continuousHitDelay")
-							shouldHit = (hitTimer == nil or hitTimer <= 0)
-							
-							if not shouldHit then -- no hit yet, subtract from the hit delay timer
-								actor:set(prefix.."continuousHitDelay", hitTimer - 1)
-							end
-						end
-					else	-- new collision
-						shouldHit = true
-					end
-					
-					if shouldHit then
-						if args.pierceDamagerProperties then -- create pierce damager
-							local parent = Projectile.getParent(self)
-							if args.pierceDamagerProperties.damagerType == Projectile.DamagerType.EXPLOSION then
-								parent:fireExplosion(self.x, self.y,
-								args.pierceDamagerProperties.explosionWidth/19,
-								args.pierceDamagerProperties.explosionHeight/4,
-								args.pierceDamagerProperties.damage,
-								args.pierceDamagerProperties.explosionSprite,
-								args.pierceDamagerProperties.hitSprite,
-								args.pierceDamagerProperties.mlDamagerProperties)
-							else
-								local bullet = parent:fireBullet(self.x, self.y,
-								args.pierceDamagerProperties.direction,
-								args.pierceDamagerProperties.distance,
-								args.pierceDamagerProperties.damage,
-								args.pierceDamagerProperties.hitSprite,
-								args.pierceDamagerProperties.mlDamagerProperties
-								)
-								bullet:set("specific_target", actorId)
-							end
-						end
-						if pierceCount == nil or pierceCount == 0 then -- if that was the last pierce, destroy projectile
-							self:destroy()
-							return
-						end
-						if newPierce then self:set(prefix.."pierceCount", pierceCount -1) end-- subtract from remaining pierces
-						if actor then actor:set(prefix.."continuousHitDelay", args.continuousHitDelay) end
-					end
-				end
-			end
-			--store current collisions for next check
-			self:set(prefix.."processedActorCollisions", json.encode(currentCollisions))
-		end
-		
-		-- check for map collisions
-		local phaseCount = self:get(prefix.."phaseCount")
-		if phaseCount == nil or phaseCount >= 0 then --need to watch for collisions
-			local alreadyPhasing = self:get(prefix.."alreadyPhasing")
-			if self:collidesMap(self.x, self.y) then
-				--collision, check if currently mid-phase (not a new collision)
-				if not alreadyPhasing then -- new collision,  explode if nil or 0, otherwise subtract and set to ignore current collision
-					if (phaseCount == nil or phaseCount == 0) then
-						self:destroy()
-						return
-					end
-					self:set(prefix.."phaseCount", phaseCount -1)
-					self:set(prefix.."alreadyPhasing", 1)
-				end
-			elseif alreadyPhasing then --just exited phase, reset ready for future checks
-				self:set(prefix.."alreadyPhasing", nil)
-			end
-		end
-		
-		--check if timer expired
-		local timer = self:get(prefix.."timer")
-		if timer then
-			if timer <= 0 then
-				self:destroy()
-				return
-			end
-			self:set(prefix.."timer", timer - 1)
-		end
-		
-		--check if distance travelled
-		local distance = self:get(prefix.."distance")
-		if distance then
-			local currentDistance = self:get(prefix.."travelled")
-			local lastX = self:get(prefix.."lastX")
-			local lastY = self:get(prefix.."lastY")
-			local deltaX = math.abs(self.x - lastX)
-			local deltaY = math.abs(self.y - lastY)
-			local travelled = math.sqrt(deltaX^2 + deltaY^2)
-			if currentDistance + travelled >= distance then
-				self:destroy()
-				return
-			end
-			
-			self:set(prefix.."travelled", currentDistance + travelled)
-			
-			self:set(prefix.."lastX", self.x)
-			self:set(prefix.."lastY", self.y)
-		end
-	end)
-	projectileObject:addCallback("destroy", function(self)
-		print("destroy")
-		if not args.endDamagerProperties then return end
-		local parent = Projectile.getParent(self)
-		if args.endDamagerProperties.damagerType == Projectile.DamagerType.EXPLOSION then
-			parent:fireExplosion(self.x, self.y,
-			args.endDamagerProperties.explosionWidth/19,
-			args.endDamagerProperties.explosionHeight/4,
-			args.endDamagerProperties.damage,
-			args.endDamagerProperties.explosionSprite,
-			args.endDamagerProperties.hitSprite,
-			args.endDamagerProperties.mlDamagerProperties)
-		else
-			parent:fireBullet(self.x, self.y,
-			args.endDamagerProperties.direction,
-			args.endDamagerProperties.distance,
-			args.endDamagerProperties.damage,
-			args.endDamagerProperties.hitSprite,
-			args.endDamagerProperties.mlDamagerProperties)
-			
-		end
-	end)
+	PROJECTILE_ARGS[args.name] = args
+	projectileObject:addCallback("create", projectileInit)
+	projectileObject:addCallback("step", projectileStep)
+	projectileObject:addCallback("destroy", projectileDestroy)
 	return projectileObject
 end
 
@@ -345,20 +356,20 @@ function Projectile.fire(projectileObject, x, y, parent, direction, velocity, ph
 	assert(validateArguments({projectileObject = projectileObject, x = x, y = y, parent = parent, direction = direction, velocity = velocity, physics = physics},
 	fireParameters))
 	local projectileInstance = projectileObject:create(x,y)
-	
+	local accessor = projectileInstance:getAccessor()
 	--set movement
 	projectileInstance.angle = direction
 	local vy = math.sin(math.rad(direction)) * velocity
 	local vx = math.cos(math.rad(direction)) * velocity
-	projectileInstance:set("hspeed", vx)
-	projectileInstance:set("vspeed", vy)
+	accessor["hspeed"] = vx
+	accessor["vspeed"] = vy
 	
 	--TODO: optional to override damage here
-	projectileInstance:set(prefix.."parent", parent.id)
-	projectileInstance:set(prefix.."team", parent:get("team"))
+	accessor["btd_projectile_parent"] = parent.id
+	accessor["btd_projectile_team"] = parent:get("team")
 	if physics then
-		projectileInstance:set(prefix.."ax", physics.ax)
-		projectileInstance:set("gravity", physics.ay)
+		accessor["btd_projectile_ax"] = physics.ax
+		accessor["gravity"] = physics.ay
 	end
 end
 
@@ -397,7 +408,7 @@ end
 
 -- the method that will be called each step to handle the collisions for registered pseudoProjectiles
 function Projectile.handlePseudoProjectiles()
-	--for continuous hits, set a variable prefix..[instanceID].."collision" with the frameDelay, as a timer
+	--for continuous hits, set a variable PREFIX..[instanceID].."collision" with the frameDelay, as a timer
 	for instance, args in pairs(Projectile.pseudoProjectiles) do
 		pseudoProjectileStep(instance, args)
 	end
